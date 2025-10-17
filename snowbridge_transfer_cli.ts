@@ -8,6 +8,9 @@ import fs from 'fs';
 import { exit } from 'process';
 import 'dotenv/config';
 import { ethers } from 'ethers';
+import { askAndCheckWethBalance } from './check_balance_eth';
+import { Keyring } from '@polkadot/keyring';
+import { cryptoWaitReady } from '@polkadot/util-crypto';
 
 
 
@@ -211,6 +214,45 @@ function toBaseUnits(human: string, decimals: number): bigint {
 /* ---------------- MAIN ---------------- */
 
 async function main() {
+
+
+   // 0) úvodná voľba: kontrola zostatku alebo rovno transfer
+  const firstAns = await prompts({
+    type: 'select',
+    name: 'action',
+    message: 'Čo chceš urobiť?',
+    initial: 0,
+    choices: [
+      { title: 'Skontrolovať zostatok (WETH/ETH)', value: 'check' },
+      { title: 'Pokračovať na transfer', value: 'transfer' }
+    ]
+  });
+
+  if (firstAns.action === 'check') {
+    try {
+      // Tvoja existujúca funkcia v check_balance_eth.ts
+      await askAndCheckWethBalance();
+    } catch (e: any) {
+      console.error('❌ Kontrola zostatku zlyhala:', e?.message ?? e);
+    }
+
+    // Po kontrole sa opýtaj, či pokračovať ďalej v transfere
+    const cont = await prompts({
+      type: 'confirm',
+      name: 'go',
+      message: 'Chceš pokračovať k transferu?',
+      initial: true
+    });
+
+    if (!cont.go) {
+      console.log('👋 Končím podľa želania.');
+      exit(0);
+    }
+  }
+
+
+
+
   // 1) ENV
   const envAns = await prompts({
     type: 'select',
@@ -468,16 +510,81 @@ async function main() {
 
     
   } else {
-    console.log('[QUOTE] getDeliveryFee (DOT -> ETH)...');
-    const fee = await toEthereumV2.getDeliveryFee(context, para, registry, tokenAddress);
-    console.log('DeliveryFee:', fee);
+  console.log('[QUOTE] getDeliveryFee (DOT -> ETH)...');
+  const feeQuote = await toEthereumV2.getDeliveryFee(context, para, registry, tokenAddress);
+  console.log('DeliveryFee:', feeQuote);
 
-    console.log('\n[CREATE] createTransfer (DOT -> ETH) - náhľad extrinsicu');
-    const { tx } = await toEthereumV2.createTransfer(
-      { sourceParaId: para, context }, registry, fromDot, toEth, tokenAddress, amount, fee
-    );
-    console.log('Substrate extrinsic vytvorený:', !!tx);
+  console.log('\n[CREATE] createTransfer (DOT -> ETH) - náhľad extrinsicu');
+  const { tx } = await toEthereumV2.createTransfer(
+    { sourceParaId: para, context }, registry, fromDot, toEth, tokenAddress, amount, feeQuote
+  );
+  console.log('Substrate extrinsic vytvorený:', !!tx);
+
+  // ---- EXECUTE (voliteľne) ----
+  const execDot = await prompts({
+    type: 'confirm',
+    name: 'go',
+    message: 'Chceš extrinsic rovno odoslať? (DOT → ETH)',
+    initial: false
+  });
+
+  if (execDot.go) {
+  try {
+    await cryptoWaitReady();
+    const keyring = new Keyring({ type: 'sr25519' });
+
+    const seedOrMnemonic =
+      process.env.PASEO_SEED ??
+      process.env.PASEO_MNEMONIC ?? null;
+
+    if (!seedOrMnemonic) {
+      throw new Error('Chýba PASEO_SEED alebo PASEO_MNEMONIC v .env');
+    }
+
+    const signer = keyring.addFromUri(seedOrMnemonic);
+
+    console.log('✍️  Posielam extrinsic… (čakám na finalizáciu)');
+    await new Promise<void>((resolve, reject) => {
+      let unsub: (() => void) | undefined;
+
+      tx.signAndSend(signer, (result) => {
+        const { status, dispatchError, txHash, events } = result;
+
+        if (status.isReady) {
+          console.log('⏳ Ready');
+        } else if (status.isBroadcast) {
+          console.log('📡 Broadcast');
+        } else if (status.isInBlock) {
+          console.log(`📦 InBlock: ${status.asInBlock.toString()} (tx: ${txHash?.toString?.()})`);
+        }
+
+        if (dispatchError) {
+          // voliteľné: dekódovanie Module erroru, ak máš po ruke api/registry
+          console.error('❌ Dispatch error:', dispatchError.toString());
+          if (unsub) unsub();
+          reject(new Error(dispatchError.toString()));
+          return;
+        }
+
+        if (status.isFinalized) {
+          console.log(`✅ Finalized: ${status.asFinalized.toString()}`);
+          for (const { event } of events) {
+            console.log(`• ${event.section}.${event.method}`, event.data.toString());
+          }
+          if (unsub) unsub();
+          resolve();
+        }
+      })
+      .then(u => { unsub = u; })
+      .catch(err => reject(err));
+    });
+
+  } catch (e: any) {
+    console.error('Send failed:', e?.message ?? e);
   }
+}
+
+}
   exit(0);
 }
 
