@@ -19,7 +19,7 @@ async function main() {
   const weth = new ethers.Contract(WETH, wethAbi, wallet);
 
   // zabaľ 0.01 ETH (môžeš zmeniť napr. na 0.003 alebo 0.005)
-  const tx = await weth.deposit({ value: ethers.parseEther('0.01') });
+  const tx = await weth.deposit({ value: ethers.parseEther('0.1') });
   console.log('deposit tx:', tx.hash);
   await tx.wait();
 
