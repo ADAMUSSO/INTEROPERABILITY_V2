@@ -46,6 +46,86 @@ const erc20Abi = [
   'function balanceOf(address owner) view returns (uint256)'
 ];
 
+
+
+
+// --- helper: čo najlepšie vytiahni názov z meta objektu ---
+function extractParaName(meta: any): string | undefined {
+  return (
+    meta?.name ||
+    meta?.display ||
+    meta?.chainName ||
+    meta?.parachainName ||
+    meta?.metadata?.name ||
+    meta?.info?.name ||
+    meta?.id || // niekedy je tu textový názov
+    undefined
+  );
+}
+
+// --- voliteľný fallback: doplň známe mena podľa svojho prostredia ---
+const FALLBACK_PARA_NAMES: Record<Env, Record<number, string>> = {
+  local_e2e: {
+    1000: 'AssetHub (local)',
+  },
+  paseo_sepolia: {
+    1000: 'AssetHub (Paseo)',
+    // 1002: 'BridgeHub (Paseo)', // doplň, ak potrebuješ
+  },
+  westend_sepolia: {
+    1000: 'AssetHub (Westend)',
+  },
+  polkadot_mainnet: {
+    1000: 'AssetHub',
+    // 1002: 'BridgeHub',
+  },
+};
+
+// --- helper: urob peknú nálepku mena pre daný pid ---
+function labelForPara(env: Env, pid: number, meta: any): string {
+  const fromMeta = extractParaName(meta);
+  const fromFallback = FALLBACK_PARA_NAMES[env]?.[pid];
+  const name = fromMeta || fromFallback || 'Parachain';
+  return `${name} (${pid})`;
+}
+
+// --- vytvor choices dynamicky z registry JSON ---
+function parachainChoicesFromRegistry(env: Env): { title: string; value: number }[] {
+  const reg = readRegistryJson(env);
+  if (!reg?.parachains || typeof reg.parachains !== 'object') return [];
+
+  return Object.entries<any>(reg.parachains)
+    .map(([pidStr, meta]) => {
+      const pid = Number(pidStr);
+      return { title: labelForPara(env, pid, meta), value: pid };
+    })
+    .sort((a, b) => a.value - b.value);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 function getSepoliaWallet() {
   const rpc = process.env.SEPOLIA_RPC;
   const pk  = process.env.SEPOLIA_PRIVKEY;
@@ -281,26 +361,30 @@ async function main() {
   });
   const direction = dirAns.direction as Direction;
 
-  // 3) parachain
-  const paraChoice = await prompts({
-    type: 'select',
-    name: 'paraPreset',
-    message: direction === 'eth_to_dot' ? 'Cieľový parachain (paraId)' : 'Zdrojový parachain (paraId)',
-    choices: [
-      { title: 'AssetHub (1000)', value: 1000 },
-      { title: 'Zadať vlastné paraId…', value: -1 }
-    ]
+// 3) parachain (nahrádza pôvodný pevný zoznam)
+const dynChoices = parachainChoicesFromRegistry(env);
+
+const paraChoice = await prompts({
+  type: 'select',
+  name: 'paraPreset',
+  message: direction === 'eth_to_dot' ? 'Cieľový parachain (paraId)' : 'Zdrojový parachain (paraId)',
+  choices: [
+    ...dynChoices,
+    { title: 'Zadať vlastné paraId…', value: -1 }
+  ]
+});
+
+let paraId: number = paraChoice.paraPreset;
+if (paraId === -1) {
+  const manual = await prompts({
+    type: 'text',
+    name: 'pid',
+    message: 'Zadaj paraId (napr. 1000):',
+    validate: (v: string) => /^\d+$/.test(v) ? true : 'Zadaj celé číslo'
   });
-  let paraId: number = paraChoice.paraPreset;
-  if (paraId === -1) {
-    const manual = await prompts({
-      type: 'text',
-      name: 'pid',
-      message: 'Zadaj paraId (napr. 1000):',
-      validate: (v: string) => /^\d+$/.test(v) ? true : 'Zadaj celé číslo'
-    });
-    paraId = Number(manual.pid);
-  }
+  paraId = Number(manual.pid);
+}
+
 
   // 4) TOKENY z registry (JSON -> fallback na objekt)
   const regJson = readRegistryJson(env);
