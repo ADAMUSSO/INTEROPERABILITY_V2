@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Raleway:wght@100..900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=SUSE+Mono:ital,wght@0,100..800;1,100..800&display=swap');
 
 
 :root{
@@ -8,9 +8,9 @@
   --text: #e9edf3;
   --text2: #171717;
   --muted: #a8b0bd;
-  --font: 'Raleway', sans-serif;
+  --font: 'SUSE Mono', sans-serif;
   --brand: #e6a017;
-  --brand-2: #c3811f;
+  --brand-2: rgb(195, 129, 31);
 
   --radius-lg: 16px;
   --radius-pill: 999px;
@@ -23,10 +23,7 @@ background-repeat: no-repeat;
   background-attachment: fixed; 
   background-size: 100% 100%;
 }
-a { color: inherit; text-decoration: none; 
-color: var(--text);
-  position: relative;
-  text-decoration: none;}
+
 
 /* ===== HEADER ===== */
 .container.header-inner{
@@ -44,7 +41,7 @@ color: var(--text);
 }
 
 .brand{
-  font-weight: 800;
+  font-weight: 600;
   font-size: 1.6rem;
   white-space: nowrap;
 }
@@ -54,14 +51,22 @@ color: var(--text);
   gap: clamp(1rem, 3vw, 3rem);  /* väčšie medzery medzi linkami */
 }
 
-.nav a{
+
+.nav a,
+.nav button {
   font-size: 1.3rem;
-  font-weight: 600;
+  font-weight: 500;
   padding: .25rem .4rem;
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  position: relative;
+  font-family: var(--font);
 }
 
-
-a::before {
+.nav button::before,
+.nav a::before {
   content: '';
   position: absolute;
   width: 100%;
@@ -75,7 +80,8 @@ a::before {
   transition: transform .3s ease-in-out;
 }
 
-a:hover::before {
+.nav button:hover::before,
+.nav a:hover::before {
   transform-origin: left;
   transform: scaleX(1);
 }
@@ -125,12 +131,12 @@ a:hover::before {
 .input{
   width: 100%;
   height: 52px;                 /* väčšia výška */
-  font-size: 1.5rem;           /* väčší text */
+  font-size: 1.2rem;           /* väčší text */
   padding: 0 18px;
   border-radius: 999px;
   border: none;
   font: var(--font);
-  font-weight: 700;
+  font-weight: 500;
   outline: none;
   background: #dfe3ea;
   color: #1a1a1a;
@@ -250,4 +256,11 @@ a:hover::before {
 .import-wallet:hover{
   cursor: pointer;
   background: var(--brand-2);
+}
+
+/* ===== SEKCIE (spoločný štýl pre všetky stránky) ===== */
+section {
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
 }
