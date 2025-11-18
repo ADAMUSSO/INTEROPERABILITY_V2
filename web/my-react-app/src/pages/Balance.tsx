@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import './Balance.css';
-import DotChainSelect, { type DotChain } from '../components/DotChainSelect';
-import DotAssetSelect from '../components/DotAssetSelect';
+import DotChainSelect, { type DotChain } from '../components/Check_balance/DotChainSelect';
+import DotAssetSelect from '../components/Check_balance/DotAssetSelect';
 
 
 
@@ -17,6 +17,9 @@ export default function Balance() {
   // DOT
   const [dotChain, setDotChain] = useState<DotChain | ''>('');
   const [dotAsset, setDotAsset] = useState('');
+
+
+  //ETH
 
 
   // common

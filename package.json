@@ -4,7 +4,8 @@
   "dependencies": {
     "@paraspell/sdk": "^11.12.2",
     "@polkadot-api/polkadot-signer": "^0.1.6",
-    "@polkadot/api": "^16.4.8",
+    "@polkadot/api": "^16.4.9",
+    "@polkadot/extension-dapp": "^0.62.3",
     "@polkadot/keyring": "^13.5.6",
     "@snowbridge/api": "^0.2.7",
     "@snowbridge/registry": "^0.2.7",

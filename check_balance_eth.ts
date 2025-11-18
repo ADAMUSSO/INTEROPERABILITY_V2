@@ -7,11 +7,8 @@ import { stdin as input, stdout as output } from 'node:process';
 const NETWORK = (process.env.NETWORK || 'sepolia').toLowerCase();
 const RPC = process.env.SEPOLIA_RPC || '';
 
-const WETH_BY_NETWORK: Record<string, string> = {
-  sepolia: '0xfff9976782d46cc05630d1f6ebab18b2324d6b14',
-  mainnet: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
-};
-const WETH_ADDRESS = (process.env.WETH_ADDRESS || WETH_BY_NETWORK[NETWORK]) as `0x${string}`;
+
+const WETH_ADDRESS = (process.env.WETH_ADDRESS! ) as `0x${string}`;
 
 const ERC20_ABI = [
   'function balanceOf(address) view returns (uint256)',
@@ -55,7 +52,7 @@ export async function askAndCheckWethBalance(): Promise<void> {
   }
 }
 
-// CLI spúšťanie (funguje v CommonJS aj TS)
+
 if (typeof require !== 'undefined' && typeof module !== 'undefined' && require.main === module) {
   askAndCheckWethBalance().catch((e) => {
     console.error(e);

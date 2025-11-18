@@ -5,15 +5,22 @@ import prompts from 'prompts';
 import { Context, contextConfigFor, toPolkadotV2, toEthereumV2 } from '@snowbridge/api';
 import { assetRegistryFor } from '@snowbridge/registry';
 import fs from 'fs';
+import { exit } from 'process';
 import 'dotenv/config';
 import { ethers } from 'ethers';
 import { askAndCheckWethBalance } from './check_balance_eth';
 import { Keyring } from '@polkadot/keyring';
 import { cryptoWaitReady } from '@polkadot/util-crypto';
 
+
+
+
+
 type Env = 'local_e2e' | 'paseo_sepolia' | 'westend_sepolia' | 'polkadot_mainnet';
 type Direction = 'eth_to_dot' | 'dot_to_eth';
 type TokenInfo = { symbol: string; address: string; decimals?: number };
+
+
 
 function isHexAddress(v: string) {
   return /^0x[a-fA-F0-9]{40}$/.test(v);
@@ -33,12 +40,16 @@ function envLabel(env: Env) {
 
 /* ---------------- Registry helpers ---------------- */
 
+
 const erc20Abi = [
   'function approve(address spender, uint256 value) returns (bool)',
   'function allowance(address owner, address spender) view returns (uint256)',
   'function decimals() view returns (uint8)',
   'function balanceOf(address owner) view returns (uint256)'
 ];
+
+
+
 
 // --- helper: čo najlepšie vytiahni názov z meta objektu ---
 function extractParaName(meta: any): string | undefined {
@@ -49,18 +60,30 @@ function extractParaName(meta: any): string | undefined {
     meta?.parachainName ||
     meta?.metadata?.name ||
     meta?.info?.name ||
-    meta?.id ||
+    meta?.id || // niekedy je tu textový názov
     undefined
   );
 }
 
+// --- voliteľný fallback: doplň známe mena podľa svojho prostredia ---
 const FALLBACK_PARA_NAMES: Record<Env, Record<number, string>> = {
-  local_e2e: { 1000: 'AssetHub (local)' },
-  paseo_sepolia: { 1000: 'AssetHub (Paseo)' },
-  westend_sepolia: { 1000: 'AssetHub (Westend)' },
-  polkadot_mainnet: { 1000: 'AssetHub' },
+  local_e2e: {
+    1000: 'AssetHub (local)',
+  },
+  paseo_sepolia: {
+    1000: 'AssetHub (Paseo)',
+    // 1002: 'BridgeHub (Paseo)', // doplň, ak potrebuješ
+  },
+  westend_sepolia: {
+    1000: 'AssetHub (Westend)',
+  },
+  polkadot_mainnet: {
+    1000: 'AssetHub',
+    // 1002: 'BridgeHub',
+  },
 };
 
+// --- helper: urob peknú nálepku mena pre daný pid ---
 function labelForPara(env: Env, pid: number, meta: any): string {
   const fromMeta = extractParaName(meta);
   const fromFallback = FALLBACK_PARA_NAMES[env]?.[pid];
@@ -68,13 +91,42 @@ function labelForPara(env: Env, pid: number, meta: any): string {
   return `${name} (${pid})`;
 }
 
+// --- vytvor choices dynamicky z registry JSON ---
 function parachainChoicesFromRegistry(env: Env): { title: string; value: number }[] {
   const reg = readRegistryJson(env);
   if (!reg?.parachains || typeof reg.parachains !== 'object') return [];
+
   return Object.entries<any>(reg.parachains)
-    .map(([pidStr, meta]) => ({ title: labelForPara(env, Number(pidStr), meta), value: Number(pidStr) }))
+    .map(([pidStr, meta]) => {
+      const pid = Number(pidStr);
+      return { title: labelForPara(env, pid, meta), value: pid };
+    })
     .sort((a, b) => a.value - b.value);
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function getSepoliaWallet() {
   const rpc = process.env.SEPOLIA_RPC;
@@ -94,6 +146,9 @@ async function ensureAllowance(token: string, owner: string, spender: string, ne
   await tx.wait();
   console.log('approve confirmed');
 }
+
+
+
 
 function registryJsonPath(env: Env): string | null {
   const file =
@@ -129,6 +184,7 @@ function tokensFromRegistryJson(
   const seen = new Set<string>();
   const isAddr = (v: any) => typeof v === 'string' && /^0x[a-fA-F0-9]{40}$/.test(v);
 
+  // EVM strana: prejdi všetky ethereumChains.*.assets
   const evmChains = reg?.ethereumChains;
   if (evmChains && typeof evmChains === 'object') {
     for (const chainKey of Object.keys(evmChains)) {
@@ -147,6 +203,7 @@ function tokensFromRegistryJson(
     }
   }
 
+  // DOT/parachain strana (užitočné najmä pre DOT→ETH): parachains[paraId].assets
   if (paraId != null) {
     const pa = reg?.parachains?.[String(paraId)]?.assets;
     if (pa && typeof pa === 'object') {
@@ -162,6 +219,7 @@ function tokensFromRegistryJson(
       }
     }
   }
+
   return out;
 }
 
@@ -169,6 +227,7 @@ function tokensFromRegistryJson(
 function tokensFromRegistryObject(reg: any): TokenInfo[] {
   const out: TokenInfo[] = [];
   const seen = new Set<string>();
+
   function walk(node: any, keyHint?: string) {
     if (!node || typeof node !== 'object') return;
     const addr: unknown = node.address ?? node.contract ?? node.erc20;
@@ -195,13 +254,15 @@ function tokensFromRegistryObject(reg: any): TokenInfo[] {
 
 /** Prefiltruje tokeny na tie, pre ktoré vieme získať fee pre danú trasu (tým pádom sú použiteľné) */
 async function filterSupportedForRoute(
-  context: Context,
-  registry: ReturnType<typeof assetRegistryFor>,
+  env: Env,
   direction: Direction,
   paraId: number,
   tokens: TokenInfo[]
 ) {
+  const context  = new Context(contextConfigFor(env));
+  const registry = assetRegistryFor(env);
   const supported: TokenInfo[] = [];
+
   for (const t of tokens) {
     try {
       if (direction === 'eth_to_dot') {
@@ -211,9 +272,8 @@ async function filterSupportedForRoute(
       }
       supported.push(t);
     } catch {
-      // skip
+      // token pre danú trasu preskočíme
     }
-    await new Promise(r => setTimeout(r, 120));
   }
   return supported;
 }
@@ -221,20 +281,24 @@ async function filterSupportedForRoute(
 /** Bezpečný prepočet z ľudského čísla ("1.23") na base units podľa decimals -> BigInt */
 function toBaseUnits(human: string, decimals: number): bigint {
   const s = human.trim().replace(',', '.');
-  if (!/^\d+(\.\d+)?$/.test(s)) throw new Error('Zadaj kladné číslo, napr. 1 alebo 0.5');
+  if (!/^\d+(\.\d+)?$/.test(s)) {
+    throw new Error('Zadaj kladné číslo, napr. 1 alebo 0.5');
+  }
   const [intPart, fracPartRaw = ''] = s.split('.');
-  if (fracPartRaw.length > decimals) throw new Error(`Maximálne ${decimals} desatinných miest pre tento token.`);
-  const fracPart = fracPartRaw.padEnd(decimals, '0');
-  const combined = (intPart + fracPart).replace(/^0+/, '') || '0';
+  if (fracPartRaw.length > decimals) {
+    throw new Error(`Maximálne ${decimals} desatinných miest pre tento token.`);
+  }
+  const fracPart = fracPartRaw.padEnd(decimals, '0'); // doplníme doprava
+  const combined = (intPart + fracPart).replace(/^0+/, '') || '0'; // odstráň leading zeros
   return BigInt(combined);
 }
 
 /* ---------------- MAIN ---------------- */
 
-let cleanup: () => Promise<void> = async () => {}; // bude nastavené po vytvorení Contextu
-
 async function main() {
-  // 0) úvodná voľba
+
+
+   // 0) úvodná voľba: kontrola zostatku alebo rovno transfer
   const firstAns = await prompts({
     type: 'select',
     name: 'action',
@@ -248,17 +312,28 @@ async function main() {
 
   if (firstAns.action === 'check') {
     try {
+      // Tvoja existujúca funkcia v check_balance_eth.ts
       await askAndCheckWethBalance();
     } catch (e: any) {
       console.error('❌ Kontrola zostatku zlyhala:', e?.message ?? e);
     }
-    const cont = await prompts({ type: 'confirm', name: 'go', message: 'Chceš pokračovať k transferu?', initial: true });
+
+    // Po kontrole sa opýtaj, či pokračovať ďalej v transfere
+    const cont = await prompts({
+      type: 'confirm',
+      name: 'go',
+      message: 'Chceš pokračovať k transferu?',
+      initial: true
+    });
+
     if (!cont.go) {
       console.log('👋 Končím podľa želania.');
-      await cleanup(); // zatiaľ no-op
-      return process.exit(0);
+      exit(0);
     }
   }
+
+
+
 
   // 1) ENV
   const envAns = await prompts({
@@ -288,57 +363,43 @@ async function main() {
   });
   const direction = dirAns.direction as Direction;
 
-  // 3) parachain
-  const dynChoices = parachainChoicesFromRegistry(env);
-  const paraChoice = await prompts({
-    type: 'select',
-    name: 'paraPreset',
-    message: direction === 'eth_to_dot' ? 'Cieľový parachain (paraId)' : 'Zdrojový parachain (paraId)',
-    choices: [...dynChoices, { title: 'Zadať vlastné paraId…', value: -1 }]
+// 3) parachain (nahrádza pôvodný pevný zoznam)
+const dynChoices = parachainChoicesFromRegistry(env);
+
+const paraChoice = await prompts({
+  type: 'select',
+  name: 'paraPreset',
+  message: direction === 'eth_to_dot' ? 'Cieľový parachain (paraId)' : 'Zdrojový parachain (paraId)',
+  choices: [
+    ...dynChoices,
+    { title: 'Zadať vlastné paraId…', value: -1 }
+  ]
+});
+
+let paraId: number = paraChoice.paraPreset;
+if (paraId === -1) {
+  const manual = await prompts({
+    type: 'text',
+    name: 'pid',
+    message: 'Zadaj paraId (napr. 1000):',
+    validate: (v: string) => /^\d+$/.test(v) ? true : 'Zadaj celé číslo'
   });
+  paraId = Number(manual.pid);
+}
 
-  let paraId: number = paraChoice.paraPreset;
-  if (paraId === -1) {
-    const manual = await prompts({
-      type: 'text',
-      name: 'pid',
-      message: 'Zadaj paraId (napr. 1000):',
-      validate: (v: string) => /^\d+$/.test(v) ? true : 'Zadaj celé číslo'
-    });
-    paraId = Number(manual.pid);
-  }
 
-  // 3.5) jeden Context + registry
-  const context = new Context(contextConfigFor(env));
-  const registry = assetRegistryFor(env);
-
-  // cleanup pripravený až teraz (keď máme context/api)
-  const api = (context as any)?.api;
-  let _cleaned = false;
-  cleanup = async () => {
-    if (_cleaned) return;
-    _cleaned = true;
-    try { await api?.disconnect?.(); } catch {}
-    try { await (context as any)?.destroy?.(); } catch {}
-  };
-
-  // handlery ukončenia procesu
-  process.once('SIGINT', async () => { await cleanup(); process.exit(0); });
-  process.once('SIGTERM', async () => { await cleanup(); process.exit(0); });
-  process.once('uncaughtException', async (e) => { console.error(e); await cleanup(); process.exit(1); });
-  process.once('unhandledRejection', async (e) => { console.error(e); await cleanup(); process.exit(1); });
-  process.once('beforeExit', async () => { await cleanup(); });
-
-  // 4) TOKENY
+  // 4) TOKENY z registry (JSON -> fallback na objekt)
   const regJson = readRegistryJson(env);
-  let candidates: TokenInfo[] = (regJson ? tokensFromRegistryJson(regJson, direction, paraId) : []) as TokenInfo[];
+  let candidates: TokenInfo[] =
+    (regJson ? tokensFromRegistryJson(regJson, direction, paraId) : []) as TokenInfo[];
 
   if (candidates.length === 0) {
-    candidates = tokensFromRegistryObject(registry);
+    const regObj = assetRegistryFor(env);
+    candidates = tokensFromRegistryObject(regObj);
   }
 
   console.log(`[Registry] Nájdených tokenov pre ${env}: ${candidates.length}`);
-  candidates = await filterSupportedForRoute(context, registry, direction, paraId, candidates);
+  candidates = await filterSupportedForRoute(env, direction, paraId, candidates);
   console.log(`[Registry] Použiteľných pre danú trasu: ${candidates.length}`);
 
   let chosen: TokenInfo | null = null;
@@ -376,6 +437,7 @@ async function main() {
     } else {
       chosen = JSON.parse(pick.sel as string) as TokenInfo;
       chosen.address = chosen.address.toLowerCase();
+      // ak decimals v registry chýba, dopýtame si ho
       if (typeof chosen.decimals !== 'number') {
         const ans = await prompts({
           type: 'number',
@@ -408,7 +470,7 @@ async function main() {
   const tokenDecimals = chosen!.decimals as number;
   const chosenSymbol = chosen!.symbol;
 
-  // 5) amount
+  // 5) amount – používateľ zadá ľudské číslo, my ho prepočítame na base units
   let humanAmount = '';
   let amount: bigint | null = null;
   while (amount === null) {
@@ -431,15 +493,35 @@ async function main() {
   let fromEth = '', toEth = '', fromDot = '', toDotAddr = '';
   if (direction === 'eth_to_dot') {
     const a = await prompts([
-      { type: 'text', name: 'fromEth', message: `Tvoja EVM adresa na ${evm} (0x...):`, validate: (v: string) => isHexAddress(v) ? true : 'Neplatná EVM adresa' },
-      { type: 'text', name: 'toDot',  message: `Cieľová ${dot} adresa (SS58):`,       validate: (v: string) => isSs58(v) ? true : 'Neplatná SS58 adresa' }
+      {
+        type: 'text',
+        name: 'fromEth',
+        message: `Tvoja EVM adresa na ${evm} (0x...):`,
+        validate: (v: string) => isHexAddress(v) ? true : 'Neplatná EVM adresa'
+      },
+      {
+        type: 'text',
+        name: 'toDot',
+        message: `Cieľová ${dot} adresa (SS58):`,
+        validate: (v: string) => isSs58(v) ? true : 'Neplatná SS58 adresa'
+      }
     ]);
     fromEth = (a.fromEth as string).toLowerCase();
     toDotAddr = a.toDot as string;
   } else {
     const a = await prompts([
-      { type: 'text', name: 'fromDot', message: `Tvoja ${dot} adresa (SS58):`, validate: (v: string) => isSs58(v) ? true : 'Neplatná SS58 adresa' },
-      { type: 'text', name: 'toEth',   message: `Cieľová EVM adresa na ${evm} (0x...):`, validate: (v: string) => isHexAddress(v) ? true : 'Neplatná EVM adresa' }
+      {
+        type: 'text',
+        name: 'fromDot',
+        message: `Tvoja ${dot} adresa (SS58):`,
+        validate: (v: string) => isSs58(v) ? true : 'Neplatná SS58 adresa'
+      },
+      {
+        type: 'text',
+        name: 'toEth',
+        message: `Cieľová EVM adresa na ${evm} (0x...):`,
+        validate: (v: string) => isHexAddress(v) ? true : 'Neplatná EVM adresa'
+      }
     ]);
     fromDot = a.fromDot as string;
     toEth = (a.toEth as string).toLowerCase();
@@ -462,6 +544,8 @@ async function main() {
   console.log('========================================\n');
 
   // ---- QUOTE -> CREATE (náhľady, nič sa neposiela) ----
+  const context = new Context(contextConfigFor(env));
+  const registry = assetRegistryFor(env);
   const para = Number(paraId);
 
   if (direction === 'eth_to_dot') {
@@ -478,109 +562,119 @@ async function main() {
       value: (tx as any)?.value?.toString?.(),
       dataLength: (tx as any)?.data ? String((tx as any).data.length) : undefined
     });
+      // ---- EXECUTE (voliteľne) ----
+  const execAns = await prompts({
+    type: 'confirm',
+    name: 'go',
+    message: 'Chceš transakciu rovno odoslať? (len ETH → DOT)',
+    initial: false
+  });
 
-    const execAns = await prompts({
-      type: 'confirm',
-      name: 'go',
-      message: 'Chceš transakciu rovno odoslať? (len ETH → DOT)',
-      initial: false
-    });
+  if (execAns.go) {
+    try {
+      const { wallet } = getSepoliaWallet();
+      const me = await wallet.getAddress();
 
-    if (execAns.go) {
-      try {
-        const { wallet } = getSepoliaWallet();
-        const me = await wallet.getAddress();
+      // 1) approve na gateway, ak treba
+      const gateway = (tx as any)?.to as string; // 'to' z preview je gateway adresa
+      await ensureAllowance(tokenAddress, me, gateway, amount, wallet);
 
-        const gateway = (tx as any)?.to as string;
-        await ensureAllowance(tokenAddress, me, gateway, amount, wallet);
+      // 2) pošli bridgovaciu tx (presne to/value/data z preview)
+      const send = await wallet.sendTransaction({
+        to: gateway,
+        value: (tx as any)?.value ?? BigInt(0),
+        data: (tx as any)?.data
+      });
+      console.log('bridge tx sent:', send.hash);
 
-        const send = await wallet.sendTransaction({
-          to: gateway,
-          value: (tx as any)?.value ?? BigInt(0),
-          data: (tx as any)?.data
-        });
-        console.log('bridge tx sent:', send.hash);
-
-        const rcpt = await send.wait();
-        console.log('bridge tx confirmed in block:', rcpt?.blockNumber);
-      } catch (e: any) {
-        console.error('Send failed:', e?.reason ?? e?.message ?? e);
-      }
-    }
-  } else {
-    console.log('[QUOTE] getDeliveryFee (DOT -> ETH)...');
-    const feeQuote = await toEthereumV2.getDeliveryFee(context, para, registry, tokenAddress);
-    console.log('DeliveryFee:', feeQuote);
-
-    console.log('\n[CREATE] createTransfer (DOT -> ETH) - náhľad extrinsicu');
-    const { tx } = await toEthereumV2.createTransfer(
-      { sourceParaId: para, context }, registry, fromDot, toEth, tokenAddress, amount, feeQuote
-    );
-    console.log('Substrate extrinsic vytvorený:', !!tx);
-
-    const execDot = await prompts({
-      type: 'confirm',
-      name: 'go',
-      message: 'Chceš extrinsic rovno odoslať? (DOT → ETH)',
-      initial: false
-    });
-
-    if (execDot.go) {
-      try {
-        await cryptoWaitReady();
-        const keyring = new Keyring({ type: 'sr25519' });
-
-        const seedOrMnemonic =
-          process.env.PASEO_SEED ??
-          process.env.PASEO_MNEMONIC ?? null;
-
-        if (!seedOrMnemonic) {
-          throw new Error('Chýba PASEO_SEED alebo PASEO_MNEMONIC v .env');
-        }
-
-        const signer = keyring.addFromUri(seedOrMnemonic);
-
-        console.log('✍️  Posielam extrinsic… (čakám na finalizáciu)');
-        await new Promise<void>((resolve, reject) => {
-          let unsub: (() => void) | undefined;
-          tx.signAndSend(signer, (result) => {
-            const { status, dispatchError, txHash, events } = result;
-
-            if (status.isReady)       console.log('⏳ Ready');
-            else if (status.isBroadcast) console.log('📡 Broadcast');
-            else if (status.isInBlock)   console.log(`📦 InBlock: ${status.asInBlock.toString()} (tx: ${txHash?.toString?.()})`);
-
-            if (dispatchError) {
-              console.error('❌ Dispatch error:', dispatchError.toString());
-              if (unsub) unsub();
-              reject(new Error(dispatchError.toString()));
-              return;
-            }
-
-            if (status.isFinalized) {
-              console.log(`✅ Finalized: ${status.asFinalized.toString()}`);
-              for (const { event } of events) {
-                console.log(`• ${event.section}.${event.method}`, event.data.toString());
-              }
-              if (unsub) unsub();
-              resolve();
-            }
-          })
-          .then(u => { unsub = u; })
-          .catch(err => reject(err));
-        });
-      } catch (e: any) {
-        console.error('Send failed:', e?.message ?? e);
-      }
+      const rcpt = await send.wait();
+      console.log('bridge tx confirmed in block:', rcpt?.blockNumber);
+    } catch (e: any) {
+      console.error('Send failed:', e?.reason ?? e?.message ?? e);
     }
   }
 
-  await cleanup();
-  return process.exit(0);
+    
+  } else {
+  console.log('[QUOTE] getDeliveryFee (DOT -> ETH)...');
+  const feeQuote = await toEthereumV2.getDeliveryFee(context, para, registry, tokenAddress);
+  console.log('DeliveryFee:', feeQuote);
+
+  console.log('\n[CREATE] createTransfer (DOT -> ETH) - náhľad extrinsicu');
+  const { tx } = await toEthereumV2.createTransfer(
+    { sourceParaId: para, context }, registry, fromDot, toEth, tokenAddress, amount, feeQuote
+  );
+  console.log('Substrate extrinsic vytvorený:', !!tx);
+
+  // ---- EXECUTE (voliteľne) ----
+  const execDot = await prompts({
+    type: 'confirm',
+    name: 'go',
+    message: 'Chceš extrinsic rovno odoslať? (DOT → ETH)',
+    initial: false
+  });
+
+  if (execDot.go) {
+  try {
+    await cryptoWaitReady();
+    const keyring = new Keyring({ type: 'sr25519' });
+
+    const seedOrMnemonic =
+      process.env.PASEO_SEED ??
+      process.env.PASEO_MNEMONIC ?? null;
+
+    if (!seedOrMnemonic) {
+      throw new Error('Chýba PASEO_SEED alebo PASEO_MNEMONIC v .env');
+    }
+
+    const signer = keyring.addFromUri(seedOrMnemonic);
+
+    console.log('✍️  Posielam extrinsic… (čakám na finalizáciu)');
+    await new Promise<void>((resolve, reject) => {
+      let unsub: (() => void) | undefined;
+
+      tx.signAndSend(signer, (result) => {
+        const { status, dispatchError, txHash, events } = result;
+
+        if (status.isReady) {
+          console.log('⏳ Ready');
+        } else if (status.isBroadcast) {
+          console.log('📡 Broadcast');
+        } else if (status.isInBlock) {
+          console.log(`📦 InBlock: ${status.asInBlock.toString()} (tx: ${txHash?.toString?.()})`);
+        }
+
+        if (dispatchError) {
+          // voliteľné: dekódovanie Module erroru, ak máš po ruke api/registry
+          console.error('❌ Dispatch error:', dispatchError.toString());
+          if (unsub) unsub();
+          reject(new Error(dispatchError.toString()));
+          return;
+        }
+
+        if (status.isFinalized) {
+          console.log(`✅ Finalized: ${status.asFinalized.toString()}`);
+          for (const { event } of events) {
+            console.log(`• ${event.section}.${event.method}`, event.data.toString());
+          }
+          if (unsub) unsub();
+          resolve();
+        }
+      })
+      .then(u => { unsub = u; })
+      .catch(err => reject(err));
+    });
+
+  } catch (e: any) {
+    console.error('Send failed:', e?.message ?? e);
+  }
 }
 
-main().catch(async (e) => {
+}
+  exit(0);
+}
+
+main().catch((e) => {
   console.error('❌ Chyba:', e);
-  await cleanup();
   process.exit(1);
 });
