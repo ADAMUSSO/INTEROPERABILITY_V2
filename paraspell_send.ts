@@ -1,88 +1,129 @@
-// 0) Polyfill WebSocket pre Node (nutné aj pri auto-endpointoch)
+// 0) Polyfill WebSocket pre Node
 import { WebSocket } from 'ws';
 (globalThis as any).WebSocket = WebSocket;
 
-import { Builder, getAssetDecimals, getAllAssetsSymbols,formatUnits } from '@paraspell/sdk';
+import { Builder, getAssetDecimals, getAllAssetsSymbols, CHAINS, type TChain } from '@paraspell/sdk';
 import { Keyring } from '@polkadot/keyring';
 import { cryptoWaitReady } from '@polkadot/util-crypto';
 import { getPolkadotSigner } from 'polkadot-api/signer';
 import 'dotenv/config';
 import prompts from 'prompts';
 
-const FROM  = process.env.PASEO_ADDRESS!;   // odosielateľ
-const TO    = process.env.PASEO_ADDRESS_2!; // príjemca
-const MNEMO = process.env.PASEO_MNEMONIC!;  // 12/24 slov
+// CHAINS je už pole stringov – použijeme ho priamo
+const ALL_CHAINS = [...CHAINS] as TChain[];
 
-// Bezpečná konverzia "1.2345" -> base units BigInt podľa decimals
+
+const FROM  = process.env.PASEO_ADDRESS!;
+const TO    = process.env.PASEO_ADDRESS_2!;
+const MNEMO = process.env.PASEO_MNEMONIC!;
+
+// Prevedieme CHAINS objekt na pole stringov
+
+
 function toBaseUnits(human: string, decimals: number): bigint {
   const s = human.trim().replace(/_/g, '').replace(/,/g, '');
   if (!/^(\d+)(\.\d+)?$/.test(s)) throw new Error('Neplatné číslo.');
   const [intPart, fracRaw = ''] = s.split('.');
-  if (fracRaw.length > decimals) {
-    // orezanie by menilo hodnotu – radšej failni
-    throw new Error(`Príliš veľa desatinných miest (max ${decimals}).`);
-  }
+  if (fracRaw.length > decimals) throw new Error(`Príliš veľa desatinných miest (max ${decimals}).`);
   const frac = fracRaw.padEnd(decimals, '0');
   const full = intPart + frac;
-  return BigInt(full.replace(/^0+(?=\d)/, '')) || 0n;
+  const normalized = full.replace(/^0+(?=\d)/, '');
+  return normalized === '' ? 0n : BigInt(normalized);
 }
 
 async function main() {
   await cryptoWaitReady();
 
-  // 1) sr25519 pár + PAPI signer
   const pair = new Keyring({ type: 'sr25519' }).addFromUri(MNEMO);
   const signer = getPolkadotSigner(pair.publicKey, 'Sr25519', (payload) => pair.sign(payload));
 
-  console.log('Dostupné meny na AssetHubPaseo:', await getAllAssetsSymbols('AssetHubPaseo'));
-
-  const resp = await prompts([
-    { type: 'text', name: 'from',     message: 'Adresa odosielateľa:', initial: FROM },
-    { type: 'text', name: 'to',       message: 'Adresa prijímateľa:', initial: TO },
-    { type: 'text', name: 'currency', message: 'Mena (symbol):',      initial: 'PAS' },
+  // --- Výber chainov priamo z Paraspell SDK ---
+  const chainAns = await prompts(
+    [
     {
-      type: 'text',
-      name: 'amount',
-      message: 'Koľko chceš poslať (ľudské jednotky):',
-      initial: '0.0001',
-      validate: (v) => (/^(\d+)(\.\d+)?$/.test(String(v)) ? true : 'Zadaj nezáporné číslo')
+      type: 'select',
+      name: 'fromChain',
+      message: 'Z ktorého chainu chceš posielať?',
+      choices: ALL_CHAINS.map((c) => ({ title: c, value: c })),
+      initial: 0,
+    },
+    {
+      type: 'select',
+      name: 'toChain',
+      message: 'Na ktorý chain chceš posielať?',
+      choices: ALL_CHAINS.map((c) => ({ title: c, value: c })),
+      initial: 0,
     }
-  ], { onCancel: () => { console.log('Zrušené.'); process.exit(1); } });
+  ],
+  { onCancel: () => process.exit(1) }
+);
 
-  const { from, to, currency, amount } = resp as { from: string; to: string; currency: string; amount: string; };
+const fromChain = chainAns.fromChain as TChain;
+const toChain   = chainAns.toChain   as TChain;
 
-  const decimals = await getAssetDecimals('AssetHubPaseo', currency);
-  if (decimals == null) throw new Error(`Neviem zistiť decimals pre ${currency} na AssetHubPaseo.`);
+  console.log(`\nDostupné meny na chain-e ${fromChain}:`);
+  try {
+    const symbols = await getAllAssetsSymbols(fromChain as any);
+    console.log(symbols.join(', '));
+  } catch (e) {
+    console.error('Nepodarilo sa načítať symboly:', e);
+  }
+
+  // --- Inputs ---
+  const resp = await prompts(
+    [
+      { type: 'text', name: 'from', message: 'Adresa odosielateľa:', initial: FROM },
+      { type: 'text', name: 'to',   message: 'Adresa prijímateľa:', initial: TO },
+      {
+        type: 'text',
+        name: 'currency',
+        message: `Mena (symbol) na chain-e ${fromChain}:`,
+        initial: 'PAS'
+      },
+      {
+        type: 'text',
+        name: 'amount',
+        message: 'Koľko chceš poslať:',
+        initial: '0.0001',
+        validate: (v) => /^(\d+)(\.\d+)?$/.test(String(v)) ? true : 'Neplatné číslo'
+      }
+    ],
+    { onCancel: () => process.exit(1) }
+  );
+
+  const { from, to, currency, amount } = resp;
+
+  const decimals = await getAssetDecimals(fromChain as any, currency);
+  if (decimals == null) throw new Error(`Nenašiel som decimals pre ${currency} na ${fromChain}.`);
+
   const baseAmount = toBaseUnits(amount, decimals);
 
   console.log('\n--- Nastavenia transakcie ---');
-  console.log('Odosielateľ:', from);
-  console.log('Príjemca:', to);
-  console.log('Mena:', currency, `(decimals=${decimals})`);
-  console.log('Suma:', amount);
-  console.log('Suma (base units):', baseAmount.toString());
-  console.log('-----------------------------\n');
+  console.log('FROM chain:', fromChain);
+  console.log('TO chain:  ', toChain);
+  console.log('Token:', currency, `(decimals=${decimals})`);
+  console.log('Suma:', amount, '→', baseAmount.toString(), '\n');
 
-  // 2) Builder bez WS (Paraspell zvolí default RPC)
+  // --- Paraspell Builder ---
   const builder = Builder({})
-    .from('AssetHubPaseo')
-    .to('AssetHubPaseo')
+    .from(fromChain as any)
+    .to(toChain as any)
     .currency({ symbol: currency, amount: baseAmount })
     .address(to)
-    .senderAddress(from); // odporúčané kvôli ED/auto-swapu na DOT, ak treba
+    .senderAddress(from);
 
-  // 3) build → sign & submit
   const tx = await builder.build();
   const finalized = await (tx as any).signAndSubmit(signer);
 
-  console.log('✅ Transakcia finalizovaná');
+  console.log('✅ Hotovo!');
   console.log('TX hash:', finalized.txHash);
-  console.log('Blok číslo:', finalized.block.number);
-  console.log('Blok hash:', finalized.block.hash);
-  
-  await builder.disconnect();
+  console.log('Block:', finalized.block.number);
 
+  await builder.disconnect();
   process.exit(0);
 }
 
-main()
+main().catch((err) => {
+  console.error('❌ Error:', err);
+  process.exit(1);
+});

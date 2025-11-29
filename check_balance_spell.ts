@@ -18,7 +18,7 @@ async function main() {
 
   console.log("Raw balance (base units):", balance);
 
-  const decimals = await getAssetDecimals("AssetHubPaseo", "PAS");
+  const decimals = await getAssetDecimals("AssetHubPaseo", "WETH");
   if (decimals == null) throw new Error("Nepodarilo sa získať desatinné miesta.");
 
   // --- spôsob 1: klasický prepočet ---

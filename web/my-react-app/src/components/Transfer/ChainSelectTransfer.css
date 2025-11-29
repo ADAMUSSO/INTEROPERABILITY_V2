@@ -1,0 +1,37 @@
+/* Trigger pre combo v Transfer / Balance – vyzerá ako rounded input */
+.combo-trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  background: var(--input-bg, rgba(249, 250, 251, 0.95));
+  color: var(--input-text, #111827);
+  border: none;
+  border-radius: 999px;
+  padding: 0.9rem 1.1rem;
+  font-family: var(--font);
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 1px 0 rgba(15, 23, 42, 0.35);
+  text-align: left;
+}
+
+.combo-trigger:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.combo-trigger:hover:not(:disabled) {
+  background: rgba(249, 250, 251, 1);
+}
+
+.combo-trigger:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.combo-icon {
+  font-size: 0.9rem;
+  opacity: 0.7;
+}

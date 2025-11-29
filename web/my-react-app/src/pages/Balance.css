@@ -109,3 +109,9 @@
     opacity: 1;
   }
 }
+
+
+.submit-wrap{
+  display: flex;
+  justify-content: center;
+}
