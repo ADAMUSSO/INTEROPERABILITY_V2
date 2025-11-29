@@ -15,6 +15,49 @@ import TransferError from '../components/Transfer/TransferError';
 
 import type { Env, WalletKind } from '../components/Transfer/types';
 
+
+// ---- Paraspell helper: dostupné chainy z @paraspell/sdk ----
+async function getParaspellChainsForEnv(env: Env): Promise<string[]> {
+  try {
+    const sdk = await import('@paraspell/sdk');
+    const CHAINS: string[] = (sdk as any).CHAINS ?? [];
+
+    // ALL_CHAINS = [...CHAINS] ako v tvojom CLI
+    const allChains = [...CHAINS];
+
+    // jednoduchý filter podľa prostredia
+    switch (env) {
+      case 'paseo_sepolia':
+        // Paseo testnet chainy – prispôsob si podľa reálnych názvov
+        return allChains.filter((c) => c.toLowerCase().includes('paseo'));
+
+      case 'westend_sepolia':
+        return allChains.filter((c) => c.toLowerCase().includes('westend'));
+
+      case 'polkadot_mainnet':
+        // mainnet: všetko ostatné, čo nie je Paseo/Westend
+        return allChains.filter(
+          (c) =>
+            !c.toLowerCase().includes('paseo') &&
+            !c.toLowerCase().includes('westend'),
+        );
+
+      default:
+        return [];
+    }
+  } catch (e) {
+    console.error('[Transfer] Failed to load Paraspell CHAINS:', e);
+    return [];
+  }
+}
+
+
+
+
+
+
+
+
 /* ===================== Registry helpers ===================== */
 
 function evmLabelForEnv(env: Env): string {
@@ -55,6 +98,14 @@ const FALLBACK_PARA_NAMES: Partial<Record<Env, Record<number, string>>> = {
   },
 };
 
+
+const HUB_LABEL_BY_ENV: Partial<Record<Env, string>> = {
+  paseo_sepolia: 'Paseo AssetHub (1000)',
+  westend_sepolia: 'Westend AssetHub (1000)',
+  polkadot_mainnet: 'Polkadot AssetHub (1000)',
+};
+
+
 function labelForPara(env: Env, pid: number, meta: any): string {
   const fromMeta = extractParaName(meta);
   const fromFallback = FALLBACK_PARA_NAMES[env]?.[pid];
@@ -86,6 +137,7 @@ async function loadRegistryJson(env: Env): Promise<any | null> {
 async function fetchChainsForEnv(
   env: Env,
 ): Promise<{ sourceChains: string[]; destChains: string[] }> {
+  // 1) SNOWBRIDGE – EVM label + parachainy z registry JSON
   const evmLabel = evmLabelForEnv(env);
   const reg = await loadRegistryJson(env);
 
@@ -100,7 +152,7 @@ async function fetchChainsForEnv(
 
   const sourceChains = [evmLabel];
 
-  const destChains = Array.from(destLabels).sort((a, b) => {
+  let destChains = Array.from(destLabels).sort((a, b) => {
     const pidA = Number(a.match(/\((\d+)\)\s*$/)?.[1] ?? Infinity);
     const pidB = Number(b.match(/\((\d+)\)\s*$/)?.[1] ?? Infinity);
     return pidA - pidB;
@@ -110,19 +162,34 @@ async function fetchChainsForEnv(
     console.warn('[Transfer] registry JSON neobsahuje parachains, používam fallback hodnoty');
     switch (env) {
       case 'paseo_sepolia':
-        destChains.push('PaseoAssetHub');
+        destChains.push('Paseo AssetHub (1000)');
         break;
       case 'westend_sepolia':
-        destChains.push('WestendAssetHub');
+        destChains.push('Westend AssetHub (1000)');
         break;
       case 'polkadot_mainnet':
-        destChains.push('PolkadotAssetHub');
+        destChains.push('Polkadot AssetHub (1000)');
         break;
+    }
+  }
+
+  // 2) PARASPELL – ďalšie chainy z CHAINS pre daný env
+  const paraspellChains = await getParaspellChainsForEnv(env);
+  const hubLabel = HUB_LABEL_BY_ENV[env] ?? 'AssetHub';
+
+  const paraspellLabels = paraspellChains.map(
+    (name) => `${name} (via ${hubLabel})`,
+  );
+
+  for (const label of paraspellLabels) {
+    if (!destChains.includes(label)) {
+      destChains.push(label);
     }
   }
 
   return { sourceChains, destChains };
 }
+
 
 /* ===================== Component ===================== */
 
@@ -149,6 +216,9 @@ export default function Transfer() {
 
   const modalOpen = chooserFor !== null;
   const isBusy = loading || loadingChains;
+
+
+
 
   async function connectMetaMask(): Promise<string> {
     // @ts-ignore
@@ -181,41 +251,42 @@ export default function Transfer() {
   }
 
   useEffect(() => {
-    let cancelled = false;
+  let cancelled = false;
 
-    async function load() {
-      setLoadingChains(true);
-      setError(null);
+  async function load() {
+    setLoadingChains(true);
+    setError(null);
 
-      try {
-        const { sourceChains, destChains } = await fetchChainsForEnv(env);
-        if (cancelled) return;
+    try {
+      const { sourceChains, destChains } = await fetchChainsForEnv(env);
+      if (cancelled) return;
 
-        setSourceChainOptions(sourceChains);
-        setDestChainOptions(destChains);
+      setSourceChainOptions(sourceChains);
+      setDestChainOptions(destChains);
 
-        if (!sourceChains.includes(sourceChain)) {
-          setSourceChain(sourceChains[0] ?? '');
-        }
-        if (!destChains.includes(destChain)) {
-          setDestChain(destChains[0] ?? '');
-        }
-      } catch (e: any) {
-        if (!cancelled) {
-          setError(e?.message || 'Nepodarilo sa načítať dostupné chainy.');
-          setSourceChainOptions([]);
-          setDestChainOptions([]);
-        }
-      } finally {
-        if (!cancelled) setLoadingChains(false);
+      if (!sourceChains.includes(sourceChain)) {
+        setSourceChain(sourceChains[0] ?? '');
       }
+      if (!destChains.includes(destChain)) {
+        setDestChain(destChains[0] ?? '');
+      }
+    } catch (e: any) {
+      if (!cancelled) {
+        setError(e?.message || 'Nepodarilo sa načítať dostupné chainy.');
+        setSourceChainOptions([]);
+        setDestChainOptions([]);
+      }
+    } finally {
+      if (!cancelled) setLoadingChains(false);
     }
+  }
 
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, [env, sourceChain, destChain]);
+  load();
+  return () => {
+    cancelled = true;
+  };
+}, [env]);  // ONLY env
+
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
