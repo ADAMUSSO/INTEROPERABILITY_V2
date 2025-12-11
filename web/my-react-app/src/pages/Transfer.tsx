@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
 import './Transfer.css';
 
+//==============SNOWBRIDGE IMPORTY=================
+
+
 import EnvToggle from '../components/Transfer/EnvToggle';
 import WalletModal from '../components/Transfer/WalletModal';
 
@@ -51,6 +54,44 @@ async function getParaspellChainsForEnv(env: Env): Promise<string[]> {
   }
 }
 
+//================= CONVERT  DECIMALS TO BASEUNITS=================
+function toBaseUnits(amountStr: string, decimals: number): bigint {
+  let s = amountStr.trim();
+
+  if (!s) {
+    throw new Error('Amount is empty');
+  }
+
+  // voliteľne: podpor aj čiarku ako desatinnú
+  s = s.replace(',', '.');
+
+  // povolíme formáty: "123", "1.58", "0.003", ".5"
+  if (!/^\d*\.?\d+$/.test(s)) {
+    throw new Error('Invalid amount format');
+  }
+
+  // ak je typu ".5", spravíme z toho "0.5"
+  if (s.startsWith('.')) {
+    s = '0' + s;
+  }
+
+  const [intPartRaw, fracPartRaw = ''] = s.split('.');
+  const intPart = intPartRaw || '0';
+
+  if (fracPartRaw.length > decimals) {
+    throw new Error(`Too many decimal places (max ${decimals})`);
+  }
+
+  const fracPart = fracPartRaw.padEnd(decimals, '0'); // doplníme nuly doprava
+  const fullStr = intPart + fracPart;                 // "1.58" + 6 dec → "1580000"
+
+  // odstráň leading zeros, ale nechaj aspoň jednu nulu
+  const normalized = fullStr.replace(/^0+/, '') || '0';
+
+  return BigInt(normalized);
+}
+
+
 
 
 
@@ -59,6 +100,16 @@ async function getParaspellChainsForEnv(env: Env): Promise<string[]> {
 
 
 /* ===================== Registry helpers ===================== */
+
+export type TokenInfo = {
+  chainId: number;
+  address: string;
+  name: string;
+  symbol: string;
+  decimals: number;
+  origin: 'evm' | 'parachain';
+  parachainId?: number;
+};
 
 function evmLabelForEnv(env: Env): string {
   switch (env) {
@@ -134,9 +185,56 @@ async function loadRegistryJson(env: Env): Promise<any | null> {
   }
 }
 
+
+function extractTokensFromRegistryJson(reg: any): TokenInfo[] {
+  if (!reg) return [];
+
+  const tokens: TokenInfo[] = [];
+
+  const ethChains = reg.ethereumChains ?? {};
+  for (const chainKey of Object.keys(ethChains)) {
+    const chain = ethChains[chainKey];
+    const assets = chain.assets ?? {};
+
+    for (const [address, meta] of Object.entries<any>(assets)) {
+      tokens.push({
+        chainId: chain.chainId,
+        address,
+        name: meta.name ?? '',
+        symbol: meta.symbol ?? '',
+        decimals: meta.decimals ?? 0,
+        origin: 'evm',
+      });
+    }
+  }
+
+  const parachains = reg.parachains ?? {};
+  for (const paraKey of Object.keys(parachains)) {
+    const para = parachains[paraKey];
+    const assets = para.assets ?? {};
+
+    for (const [address, meta] of Object.entries<any>(assets)) {
+      tokens.push({
+        chainId: para.parachainId,
+        address,
+        name: meta.name ?? '',
+        symbol: meta.symbol ?? '',
+        decimals: meta.decimals ?? 0,
+        origin: 'parachain',
+        parachainId: para.parachainId,
+      });
+    }
+  }
+
+  return tokens;
+}
+
+
+
+
 async function fetchChainsForEnv(
   env: Env,
-): Promise<{ sourceChains: string[]; destChains: string[] }> {
+): Promise<{ sourceChains: string[]; destChains: string[]; tokens: TokenInfo[] }> {
   // 1) SNOWBRIDGE – EVM label + parachainy z registry JSON
   const evmLabel = evmLabelForEnv(env);
   const reg = await loadRegistryJson(env);
@@ -187,13 +285,19 @@ async function fetchChainsForEnv(
     }
   }
 
-  return { sourceChains, destChains };
+  // 3) TOKENS – z registry JSON
+  const tokens = extractTokensFromRegistryJson(reg);
+
+  return { sourceChains, destChains, tokens };
 }
+
 
 
 /* ===================== Component ===================== */
 
 export default function Transfer() {
+
+  
   const [env, setEnv] = useState<Env>('paseo_sepolia');
 
   const [sourceChain, setSourceChain] = useState('Sepolia');
@@ -201,6 +305,8 @@ export default function Transfer() {
 
   const [amount, setAmount] = useState('');
   const [token, setToken] = useState('');
+  const [tokens, setTokens] = useState<TokenInfo[]>([]);
+
 
   const [sourceAddress, setSourceAddress] = useState('');
   const [destAddress, setDestAddress] = useState('');
@@ -250,7 +356,7 @@ export default function Transfer() {
     return accounts[0].address;
   }
 
-  useEffect(() => {
+useEffect(() => {
   let cancelled = false;
 
   async function load() {
@@ -258,11 +364,12 @@ export default function Transfer() {
     setError(null);
 
     try {
-      const { sourceChains, destChains } = await fetchChainsForEnv(env);
+      const { sourceChains, destChains, tokens } = await fetchChainsForEnv(env);
       if (cancelled) return;
 
       setSourceChainOptions(sourceChains);
       setDestChainOptions(destChains);
+      setTokens(tokens);
 
       if (!sourceChains.includes(sourceChain)) {
         setSourceChain(sourceChains[0] ?? '');
@@ -275,6 +382,7 @@ export default function Transfer() {
         setError(e?.message || 'Nepodarilo sa načítať dostupné chainy.');
         setSourceChainOptions([]);
         setDestChainOptions([]);
+        setTokens([]);
       }
     } finally {
       if (!cancelled) setLoadingChains(false);
@@ -285,7 +393,12 @@ export default function Transfer() {
   return () => {
     cancelled = true;
   };
-}, [env]);  // ONLY env
+}, [env]);  // stále len env
+// ONLY env
+
+  const uniqueTokenSymbols = Array.from(
+  new Set(tokens.map((t) => t.symbol).filter(Boolean)),
+);
 
 
   useEffect(() => {
@@ -337,20 +450,57 @@ export default function Transfer() {
     setDestChain(s);
   }
 
-  async function handleSubmit() {
-    if (isBusy) return;
-    setError(null);
+ async function handleSubmit() {
+  if (isBusy) return;
+  setError(null);
 
-    console.log('TODO: Submit transfer', {
-      env,
-      sourceChain,
-      destChain,
-      sourceAddress,
-      destAddress,
-      amount,
-      token,
-    });
+  const selectedToken = tokens.find((t) => t.symbol === token);
+  if (!selectedToken) {
+    setError('Prosím vyber token.');
+    return;
   }
+
+  if (!amount.trim()) {
+    setError('Prosím zadaj amount.');
+    return;
+  }
+
+  // prepočet na base units podľa token.decimals
+  let amountBase: bigint;
+  try {
+    amountBase = toBaseUnits(amount, selectedToken.decimals);
+  } catch (e: any) {
+    setError(e?.message || 'Neplatná hodnota amount.');
+    return;
+  }
+
+  if (!sourceAddress || !destAddress) {
+    setError('Prosím vyber source aj destination adresu.');
+    return;
+  }
+
+  console.log('Prepared transfer:', {
+    env,
+    sourceChain,
+    destChain,
+    sourceAddress,
+    destAddress,
+    tokenSymbol: selectedToken.symbol,
+    tokenAddress: selectedToken.address,
+    decimals: selectedToken.decimals,
+    chainId: selectedToken.chainId,
+    parachainId: selectedToken.parachainId,
+    amountHuman: amount,
+    amountBase, // toto posielaš do SDK
+  });
+
+  // TODO: tu neskôr:
+  // await buildAndSendTransfer({ env, sourceChain, destChain, selectedToken, amountBase, ... })
+}
+
+
+
+
 
   return (
     <section className="transfer-wrap">
@@ -378,9 +528,10 @@ export default function Transfer() {
         <AmountAndTokenRow
           amount={amount}
           token={token}
-          onAmountChange={setAmount}
-          onTokenChange={setToken}
-          disabled={isBusy}
+           onAmountChange={setAmount}
+           onTokenChange={setToken}
+           disabled={isBusy}
+           tokenOptions={uniqueTokenSymbols}
         />
 
         <SourceAddressRow
@@ -390,8 +541,8 @@ export default function Transfer() {
         />
 
         <DestinationAddressRow
-          value={destAddress}
-          onChange={setDestAddress}
+          address={destAddress}
+          onClick={() => setChooserFor('dest')}   // 🔹 tu sa otvorí WalletModal pre destination
           disabled={isBusy}
         />
 

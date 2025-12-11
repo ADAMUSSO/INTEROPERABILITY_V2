@@ -1,24 +1,26 @@
 // src/components/Transfer/DestinationAddressRow.tsx
 type Props = {
-  value: string;
-  onChange: (v: string) => void;
+  address: string;
+  onClick: () => void;
   disabled?: boolean;
 };
 
-export default function DestinationAddressRow({
-  value,
-  onChange,
-  disabled,
-}: Props) {
+export default function DestinationAddressRow({ address, onClick, disabled }: Props) {
   return (
-    <div className="row">
-      <input
-        className="input"
-        placeholder="Destination Address"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
+    <div className="row address-row">
+      <div className="address-info">
+        <h4>Destination Address</h4>
+        <div className="muted">{address || ''}</div>
+      </div>
+
+      <button
+        className="import-wallet"
+        type="button"
+        onClick={onClick}
         disabled={disabled}
-      />
+      >
+        {address ? 'Change Wallet' : 'Import Wallet'}
+      </button>
     </div>
   );
 }
