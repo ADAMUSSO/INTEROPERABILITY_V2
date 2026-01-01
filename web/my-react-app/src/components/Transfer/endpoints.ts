@@ -5,8 +5,8 @@ import type { Env } from './types';
 // Daj sem svoje vlastné (napr. z dokumentácie/testnet RPC providerov).
 export const ASSET_HUB_WS: Record<Env, string> = {
   paseo_sepolia: 'wss://asset-hub-paseo-rpc.n.dwellir.com',
-  westend_sepolia: 'wss://YOUR_WESTEND_ASSETHUB_WS',
-  polkadot_mainnet: 'wss://YOUR_POLKADOT_ASSETHUB_WS',
+  westend_sepolia: 'wss://westend-asset-hub-rpc.polkadot.io',
+  polkadot_mainnet: 'wss://sys.ibp.network/asset-hub-polkadot',
 };
 
 // Ako sa AssetHub volá v ParaSpell CHAINS (uprav podľa toho čo vidíš v dropdown)
