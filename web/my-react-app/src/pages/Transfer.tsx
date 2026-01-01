@@ -44,6 +44,36 @@ function toBaseUnits(amountStr: string, decimals: number): bigint {
   return BigInt(normalized);
 }
 
+function isEvmAddress(addr: string): boolean {
+  return /^0x[a-fA-F0-9]{40}$/.test(addr.trim());
+}
+
+// veľmi jednoduché SS58 overenie (nie 100% validátor, ale stačí na UX guard)
+function looksLikeSs58(addr: string): boolean {
+  const a = addr.trim();
+  return a.length >= 40 && a.length <= 60 && !a.startsWith('0x');
+}
+
+/* ===================== Paraspell token loader ===================== */
+
+async function loadParaspellSymbolsForAssetHub(env: Env): Promise<string[]> {
+  try {
+    const sdk = await import('@paraspell/sdk');
+    const { getAllAssetsSymbols } = sdk as any;
+
+    // re-use tvojej mapy z endpoints
+    const { ASSET_HUB_PARASPELL_NAME } = await import('../components/Transfer/endpoints');
+    const fromChain = ASSET_HUB_PARASPELL_NAME?.[env];
+
+    if (!fromChain || !getAllAssetsSymbols) return [];
+
+    const syms: string[] = await getAllAssetsSymbols(fromChain);
+    return (syms ?? []).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 export default function Transfer() {
   const [env, setEnv] = useState<Env>('paseo_sepolia');
 
@@ -53,6 +83,8 @@ export default function Transfer() {
   const [amount, setAmount] = useState('');
   const [token, setToken] = useState('');
   const [tokens, setTokens] = useState<TokenInfo[]>([]);
+
+  const [tokenOptions, setTokenOptions] = useState<string[]>([]);
 
   const [sourceAddress, setSourceAddress] = useState('');
   const [destAddress, setDestAddress] = useState('');
@@ -69,30 +101,33 @@ export default function Transfer() {
   const [chainMap, setChainMap] = useState<ChainOptionMap>({});
   const [status, setStatus] = useState<string | null>(null);
 
-
-
   const modalOpen = chooserFor !== null;
   const isBusy = loading || loadingChains;
+
+  const srcOpt = chainMap[sourceChain];
+  const dstOpt = chainMap[destChain];
 
   async function connectMetaMask(): Promise<string> {
     // @ts-ignore
     const { ethereum } = window;
-    if (!ethereum || !ethereum.request) throw new Error('MetaMask nie je dostupná v prehliadači.');
+    if (!ethereum || !ethereum.request) throw new Error('MetaMask is not available in the browser.');
 
     const accounts = await ethereum.request({ method: 'eth_requestAccounts' });
-    if (!accounts?.length) throw new Error('Nebola vybraná žiadna EVM adresa.');
+    if (!accounts?.length) throw new Error('No EVM address was selected.');
     return accounts[0];
   }
 
   async function connectTalisman(): Promise<string> {
     const { web3Enable, web3Accounts } = await import('@polkadot/extension-dapp');
     const exts = await web3Enable('Turbo Exchange');
-    if (!exts.length) throw new Error('Talisman/Polkadot rozšírenie nie je povolené alebo nainštalované.');
+    if (!exts.length) throw new Error('Talisman extension not found.');
 
     const accounts = await web3Accounts();
-    if (!accounts.length) throw new Error('Neboli nájdené Substrate účty v Talisman-e.');
+    if (!accounts.length) throw new Error('Could not find substrate account in Talisman.');
     return accounts[0].address;
   }
+
+  /* ===================== Load chains + snowbridge tokens ===================== */
 
   useEffect(() => {
     let cancelled = false;
@@ -117,7 +152,7 @@ export default function Transfer() {
         setDestChain((prev) => (dstLabels.includes(prev) ? prev : dstLabels[0] ?? ''));
       } catch (e: any) {
         if (!cancelled) {
-          setError(e?.message || 'Nepodarilo sa načítať dostupné chainy.');
+          setError(e?.message || 'Unable to load chains.');
           setChainMap({});
           setSourceChainOptions([]);
           setDestChainOptions([]);
@@ -135,7 +170,43 @@ export default function Transfer() {
     };
   }, [env]);
 
-  const uniqueTokenSymbols = Array.from(new Set(tokens.map((t) => t.symbol).filter(Boolean)));
+  /* ===================== Token options: EVM vs AssetHub ===================== */
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function recompute() {
+      if (!srcOpt) {
+        setTokenOptions([]);
+        setToken('');
+        return;
+      }
+
+      // EVM source -> tokeny zo Snowbridge registry
+      if (srcOpt.kind === 'evm') {
+        const syms = Array.from(new Set(tokens.map((t) => t.symbol).filter(Boolean)));
+        setTokenOptions(syms);
+        if (!syms.includes(token)) setToken('');
+        return;
+      }
+
+      // Substrate source (AssetHub) -> tokeny zo ParaSpell (+ PAS fallback)
+      const syms = await loadParaspellSymbolsForAssetHub(env);
+      const withFallback = Array.from(new Set(['PAS', ...syms].filter(Boolean)));
+
+      if (!cancelled) {
+        setTokenOptions(withFallback);
+        if (!withFallback.includes(token)) setToken('PAS');
+      }
+    }
+
+    recompute();
+    return () => {
+      cancelled = true;
+    };
+  }, [env, sourceChain, srcOpt?.kind, tokens]);
+
+  /* ===================== UX: ESC closes modal ===================== */
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -161,7 +232,7 @@ export default function Transfer() {
       else setDestAddress(addr);
       setChooserFor(null);
     } catch (e: any) {
-      setError(e?.message || 'Nepodarilo sa pripojiť peňaženku.');
+      setError(e?.message || 'Unable to connect wallet.');
     } finally {
       setLoading(false);
     }
@@ -175,34 +246,56 @@ export default function Transfer() {
     setDestChain(s);
   }
 
-  async function handleSubmit() {
+  /* ===================== Submit ===================== */
 
+  async function handleSubmit() {
     if (isBusy) return;
     setError(null);
     setStatus(null);
 
+    if (!srcOpt) return setError('Incorrect source chain.');
+    if (!dstOpt) return setError('Incorrect destination chain.');
 
-    const selectedToken = tokens.find((t) => t.symbol === token);
-    if (!selectedToken) return setError('Prosím vyber token.');
+    if (!token) return setError('Please select a token.');
+    if (!amount.trim()) return setError('Please enter an amount.');
 
-    if (!amount.trim()) return setError('Prosím zadaj amount.');
+    if (!sourceAddress || !destAddress) {
+      return setError('Please select source and destination addresses.');
+    }
+
+    // jednoduché guardy adries podľa source/dest
+    if (srcOpt.kind === 'evm' && !isEvmAddress(sourceAddress)) {
+      return setError('Source address must be EVM (0x…) — connect MetaMask.');
+    }
+    if (srcOpt.kind !== 'evm' && !looksLikeSs58(sourceAddress)) {
+      return setError('Source address must be Substrate (SS58) — connect Talisman.');
+    }
+
+    // TokenInfo: EVM token hľadáme v registry, Substrate token vytvoríme “pseudo”
+    let selectedToken: TokenInfo | null = null;
+
+    if (srcOpt.kind === 'evm') {
+      selectedToken = tokens.find((t) => t.symbol === token) ?? null;
+      if (!selectedToken) return setError('Selected token is not available for EVM source.');
+    } else {
+      // pre test stačí 10 decimals; keď budeš chcieť presne, doplníme lookup z metadata
+      selectedToken = {
+        chainId: 1000,
+        address: 'NATIVE_OR_XCM',
+        name: token,
+        symbol: token,
+        decimals: 10,
+        origin: 'parachain',
+        parachainId: 1000,
+      };
+    }
 
     let amountBase: bigint;
     try {
       amountBase = toBaseUnits(amount, selectedToken.decimals);
     } catch (e: any) {
-      return setError(e?.message || 'Neplatná hodnota amount.');
+      return setError(e?.message || 'Invalid amount value.');
     }
-
-    if (!sourceAddress || !destAddress) {
-      return setError('Prosím vyber source aj destination adresu.');
-    }
-
-    const srcOpt = chainMap[sourceChain];
-    const dstOpt = chainMap[destChain];
-
-    if (!srcOpt || srcOpt.kind !== 'evm') return setError('Neplatný source chain.');
-    if (!dstOpt) return setError('Neplatný destination chain.');
 
     const prepared: PreparedTransfer = {
       env,
@@ -217,11 +310,12 @@ export default function Transfer() {
 
     try {
       setLoading(true);
-      setStatus('Priparing transfer…');
+      setStatus('Preparing transfer…');
       const result = await executeTransfer(prepared, (msg) => setStatus(msg));
       console.log('Transfer result:', result);
+      setStatus('Finished ✅');
     } catch (e: any) {
-      setError(e?.message || 'Transfer zlyhal.');
+      setError(e?.message || 'Transfer failed.');
     } finally {
       setLoading(false);
     }
@@ -256,7 +350,7 @@ export default function Transfer() {
           onAmountChange={setAmount}
           onTokenChange={setToken}
           disabled={isBusy}
-          tokenOptions={uniqueTokenSymbols}
+          tokenOptions={tokenOptions}
         />
 
         <SourceAddressRow
@@ -272,7 +366,7 @@ export default function Transfer() {
         />
 
         <TransferError message={error} />
-        <TransferError message={status} />  
+        <TransferError message={status} />
 
         <SubmitButton loading={isBusy} onClick={handleSubmit} />
       </div>

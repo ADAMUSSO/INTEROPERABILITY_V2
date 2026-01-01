@@ -2,6 +2,24 @@
 import type { Env } from './types';
 import type { ChainOption, ChainsForEnv, ChainOptionMap, TokenInfo } from './sharedTypes';
 
+/* ===================== Constants ===================== */
+
+export const HUB_LABEL_BY_ENV: Record<Env, string> = {
+  paseo_sepolia: 'Paseo AssetHub (1000)',
+  westend_sepolia: 'Westend AssetHub (1000)',
+  polkadot_mainnet: 'Polkadot AssetHub (1000)',
+};
+
+const HUB_PARA_ID_BY_ENV: Record<Env, number> = {
+  paseo_sepolia: 1000,
+  westend_sepolia: 1000,
+  polkadot_mainnet: 1000,
+};
+
+function evmLabelForEnv(env: Env): string {
+  return env === 'polkadot_mainnet' ? 'Ethereum' : 'Sepolia';
+}
+
 /* ===================== Paraspell ===================== */
 
 async function getParaspellChainsForEnv(env: Env): Promise<string[]> {
@@ -10,15 +28,15 @@ async function getParaspellChainsForEnv(env: Env): Promise<string[]> {
     const CHAINS: string[] = (sdk as any).CHAINS ?? [];
     const allChains = [...CHAINS];
 
+    const lc = (s: string) => s.toLowerCase();
+
     switch (env) {
       case 'paseo_sepolia':
-        return allChains.filter((c) => c.toLowerCase().includes('paseo'));
+        return allChains.filter((c) => lc(c).includes('paseo'));
       case 'westend_sepolia':
-        return allChains.filter((c) => c.toLowerCase().includes('westend'));
+        return allChains.filter((c) => lc(c).includes('westend'));
       case 'polkadot_mainnet':
-        return allChains.filter(
-          (c) => !c.toLowerCase().includes('paseo') && !c.toLowerCase().includes('westend'),
-        );
+        return allChains.filter((c) => !lc(c).includes('paseo') && !lc(c).includes('westend'));
       default:
         return [];
     }
@@ -29,10 +47,6 @@ async function getParaspellChainsForEnv(env: Env): Promise<string[]> {
 }
 
 /* ===================== Snowbridge registry ===================== */
-
-function evmLabelForEnv(env: Env): string {
-  return env === 'polkadot_mainnet' ? 'Ethereum' : 'Sepolia';
-}
 
 function extractParaName(meta: any): string | undefined {
   return (
@@ -51,12 +65,6 @@ const FALLBACK_PARA_NAMES: Partial<Record<Env, Record<number, string>>> = {
   paseo_sepolia: { 1000: 'AssetHub (Paseo)' },
   westend_sepolia: { 1000: 'AssetHub (Westend)' },
   polkadot_mainnet: { 1000: 'AssetHub' },
-};
-
-export const HUB_LABEL_BY_ENV: Partial<Record<Env, string>> = {
-  paseo_sepolia: 'Paseo AssetHub (1000)',
-  westend_sepolia: 'Westend AssetHub (1000)',
-  polkadot_mainnet: 'Polkadot AssetHub (1000)',
 };
 
 function labelForPara(env: Env, pid: number, meta: any): string {
@@ -125,7 +133,26 @@ function extractTokensFromRegistryJson(reg: any): TokenInfo[] {
     }
   }
 
-  return tokens;
+  // malé čistenie: prázdne symboly von
+  return tokens.filter((t) => (t.symbol ?? '').trim().length > 0);
+}
+
+/* ===================== Helpers ===================== */
+
+function uniqByLabel(options: ChainOption[]): ChainOption[] {
+  const seen = new Set<string>();
+  const out: ChainOption[] = [];
+  for (const o of options) {
+    if (seen.has(o.label)) continue;
+    seen.add(o.label);
+    out.push(o);
+  }
+  return out;
+}
+
+function baseNameFromParaLabel(label: string): string {
+  // "Neuro Testnet (2043)" -> "neuro testnet"
+  return label.replace(/\s*\(\d+\)\s*$/, '').trim().toLowerCase();
 }
 
 /* ===================== Public loader ===================== */
@@ -135,40 +162,55 @@ export async function fetchTransferDataForEnv(
 ): Promise<{ data: ChainsForEnv; map: ChainOptionMap }> {
   const reg = await loadRegistryJson(env);
 
-  const sourceChains: ChainOption[] = [{ kind: 'evm', label: evmLabelForEnv(env) }];
+  const hubLabel = HUB_LABEL_BY_ENV[env];
+  const hubParaId = HUB_PARA_ID_BY_ENV[env];
 
-  const destChains: ChainOption[] = [];
+  // SOURCE: EVM + AssetHub (aby si vedel robiť paraspell-only testy)
+  const sourceChains: ChainOption[] = [
+    { kind: 'evm', label: evmLabelForEnv(env) },
+    { kind: 'snowbridge_para', label: hubLabel, parachainId: hubParaId },
+  ];
+
+  // DEST: snowbridge parachains z registry
+  let destChains: ChainOption[] = [];
   if (reg?.parachains && typeof reg.parachains === 'object') {
-    for (const [pidStr, meta] of Object.entries<any>(reg.parachains)) {
+    destChains = Object.entries<any>(reg.parachains).map(([pidStr, meta]) => {
       const pid = Number(pidStr);
-      destChains.push({
-        kind: 'snowbridge_para',
+      return {
+        kind: 'snowbridge_para' as const,
         label: labelForPara(env, pid, meta),
         parachainId: pid,
-      });
-    }
+      };
+    });
   }
 
-  if (!destChains.length) {
-    const fallbackLabel =
-      env === 'paseo_sepolia'
-        ? 'Paseo AssetHub (1000)'
-        : env === 'westend_sepolia'
-          ? 'Westend AssetHub (1000)'
-          : 'Polkadot AssetHub (1000)';
-
-    destChains.push({ kind: 'snowbridge_para', label: fallbackLabel, parachainId: 1000 });
+  // fallback, keď registry nedá parachains
+  if (destChains.length === 0) {
+    destChains.push({ kind: 'snowbridge_para', label: hubLabel, parachainId: hubParaId });
   }
 
+  // sort snowbridge parachains
   destChains.sort((a, b) => {
     if (a.kind !== 'snowbridge_para' || b.kind !== 'snowbridge_para') return 0;
     return a.parachainId - b.parachainId;
   });
 
+  // PARASPELL dest: pridáme XCM destinácie "via hub"
+  // ale: nech neduplikujeme veci, ktoré už existujú ako Snowbridge parachain (napr. "Paseo Asset Hub", a pod.)
   const paraspellChains = await getParaspellChainsForEnv(env);
-  const hubLabel = HUB_LABEL_BY_ENV[env] ?? 'AssetHub';
+
+  const snowbridgeBaseNames = new Set(
+    destChains
+      .filter((d) => d.kind === 'snowbridge_para')
+      .map((d) => baseNameFromParaLabel(d.label)),
+  );
 
   for (const name of paraspellChains) {
+    const base = name.trim().toLowerCase();
+
+    // ak už existuje snowbridge parachain s rovnakým názvom, nepushuj paraspell variant
+    if (snowbridgeBaseNames.has(base)) continue;
+
     destChains.push({
       kind: 'paraspell',
       label: `${name} (via ${hubLabel})`,
@@ -177,10 +219,16 @@ export async function fetchTransferDataForEnv(
     });
   }
 
+  // ešte raz dedupe (pre prípad rovnakých labelov)
+  destChains = uniqByLabel(destChains);
+
   const tokens = extractTokensFromRegistryJson(reg);
 
+  // map: label -> option (stále používaš label ako key v UI)
   const map: ChainOptionMap = {};
-  for (const o of [...sourceChains, ...destChains]) map[o.label] = o;
+  for (const o of [...sourceChains, ...destChains]) {
+    map[o.label] = o;
+  }
 
   return { data: { sourceChains, destChains, tokens }, map };
 }

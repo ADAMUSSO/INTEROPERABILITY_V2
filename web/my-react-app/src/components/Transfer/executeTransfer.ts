@@ -14,7 +14,7 @@ export type ProgressFn = (msg: string) => void;
 async function getMetaMaskSigner(): Promise<ethers.Signer> {
   // @ts-ignore
   const { ethereum } = window;
-  if (!ethereum) throw new Error('MetaMask nie je dostupná.');
+  if (!ethereum) throw new Error('MetaMask is not available in the browser.');
   const provider = new ethers.BrowserProvider(ethereum);
   return provider.getSigner();
 }
@@ -28,15 +28,10 @@ async function sendSnowbridgeEvmToPara(
   const registry = assetRegistryFor(prepared.env as any);
   const context = new Context(contextConfigFor(prepared.env as any));
 
-  progress?.('Snowbridge: počítam delivery fee…');
-  const fee = await toPolkadotV2.getDeliveryFee(
-    context,
-    registry,
-    prepared.token.address,
-    destParaId,
-  );
+  progress?.('Snowbridge: calculating fee…');
+  const fee = await toPolkadotV2.getDeliveryFee(context, registry, prepared.token.address, destParaId);
 
-  progress?.('Snowbridge: pripravujem transfer…');
+  progress?.('Snowbridge: preparing transfer…');
   const transfer = await toPolkadotV2.createTransfer(
     registry,
     prepared.sourceAddress, // EVM sender
@@ -47,132 +42,128 @@ async function sendSnowbridgeEvmToPara(
     fee,
   );
 
-  progress?.('Snowbridge: validujem transfer…');
+  progress?.('Snowbridge: validating transfer…');
   const validation = await toPolkadotV2.validateTransfer(context, transfer);
   if (!validation.success) {
-    throw new Error(`Snowbridge validateTransfer failed: ${JSON.stringify(validation.logs)}`);
+    throw new Error(`Snowbridge failed to validate transfer: ${JSON.stringify(validation.logs)}`);
   }
 
-  progress?.('Snowbridge: podpisujem a posielam EVM transakciu (MetaMask)…');
+  progress?.('Snowbridge: signing and sending EVM transaction (MetaMask)…');
   const signer = await getMetaMaskSigner();
   const resp = await signer.sendTransaction(transfer.tx);
 
-  progress?.(`Snowbridge: tx odoslaná: ${resp.hash} (čakám na potvrdenie…)`);
+  progress?.(`Snowbridge: tx sent: ${resp.hash} (waiting for confirmation...)`);
   const receipt = await resp.wait();
 
-  if (!receipt) throw new Error(`EVM tx ${resp.hash} nebola potvrdená.`);
-  progress?.(`Snowbridge: EVM tx potvrdená ✅ ${resp.hash}`);
-
+  if (!receipt) throw new Error(`EVM tx ${resp.hash} was not confirmed.`);
+  progress?.(`Snowbridge: EVM tx confirmed ${resp.hash}`);
   return resp.hash;
 }
 
-/** ParaSpell: AssetHub -> destChain */
+/** ParaSpell: AssetHub -> destChain
+ *  - signer/sender = prepared.sourceAddress (Talisman účet na AssetHube)
+ *  - recipient     = prepared.destAddress
+ */
 async function sendParaspellFromAssetHub(
   prepared: PreparedTransfer,
   destChainName: string,
   progress?: ProgressFn,
 ) {
-  progress?.('ParaSpell: pripájam sa na AssetHub WS…');
+  progress?.('ParaSpell: connectign to AssetHub WS…');
 
   const ws = ASSET_HUB_WS[prepared.env];
-  if (!ws) throw new Error('Chýba AssetHub WS endpoint (ASSET_HUB_WS) pre toto env.');
-  if (ws.includes('YOUR_')) throw new Error('Nastav ASSET_HUB_WS endpointy v endpoints.ts');
+  if (!ws) throw new Error('missing ASSET_HUB_WS endpoint v endpoints.ts.');
+  if (ws.includes('YOUR_')) throw new Error('Set ASSET_HUB_WS endpoints in endpoints.ts');
 
   const provider = new WsProvider(ws);
   const api = await ApiPromise.create({ provider });
 
-  const injector = await web3FromAddress(prepared.destAddress);
+  try {
+    // signer musí byť sourceAddress (kto posiela z AssetHubu)
+    const injector = await web3FromAddress(prepared.sourceAddress);
 
-  const { Builder } = await import('@paraspell/sdk-pjs');
+    const { Builder } = await import('@paraspell/sdk-pjs');
 
-  const fromChain = ASSET_HUB_PARASPELL_NAME[prepared.env];
-  if (!fromChain) throw new Error('Chýba ASSET_HUB_PARASPELL_NAME mapping v endpoints.ts');
+    const fromChain = ASSET_HUB_PARASPELL_NAME[prepared.env];
+    if (!fromChain) throw new Error('Missing ASSET_HUB_PARASPELL_NAME mapping in endpoints.ts');
 
-  // ParaSpell chce amount ako string (base units)
-  const amount = prepared.amountBase.toString();
+    const amount = prepared.amountBase.toString();
 
-  progress?.(`ParaSpell: pripravujem XCM ${fromChain} → ${destChainName}…`);
-  const builder = Builder()
-    .from(fromChain as any)
-    .to(destChainName as any)
-    .currency({ symbol: prepared.token.symbol, amount })
-    .address(prepared.destAddress)        // recipient (zatiaľ posielame sebe)
-    .senderAddress(prepared.destAddress); // sender (tvoj účet na AssetHube)
+    progress?.(`ParaSpell: preparing XCM ${fromChain} → ${destChainName}…`);
+    const builder = Builder()
+      .from(fromChain as any)
+      .to(destChainName as any)
+      .currency({ symbol: prepared.token.symbol, amount })
+      .address(prepared.destAddress)          // recipient
+      .senderAddress(prepared.sourceAddress); // sender (AssetHub účet)
 
-  const tx: any = await builder.build();
+    const tx: any = await builder.build();
 
-  progress?.('ParaSpell: podpisujem a posielam extrinsic (Talisman)…');
-  const hash: string = await new Promise((resolve, reject) => {
-    tx.signAndSend(
-      prepared.destAddress,
-      { signer: injector.signer },
-      (result: any) => {
-        if (result?.dispatchError) {
-          reject(new Error(result.dispatchError.toString()));
-          return;
-        }
-        if (result?.status?.isInBlock || result?.status?.isFinalized) {
-          resolve(tx.hash.toHex());
-        }
-      },
-    ).catch(reject);
-  });
+    progress?.('ParaSpell: signing and sending extrinsic (Talisman)…');
+    const hash: string = await new Promise((resolve, reject) => {
+      tx.signAndSend(
+        prepared.sourceAddress,
+        { signer: injector.signer },
+        (result: any) => {
+          if (result?.dispatchError) {
+            reject(new Error(result.dispatchError.toString()));
+            return;
+          }
+          if (result?.status?.isInBlock || result?.status?.isFinalized) {
+            resolve(tx.hash.toHex());
+          }
+        },
+      ).catch(reject);
+    });
 
-  progress?.(`ParaSpell: tx v bloku ✅ ${hash}`);
+    progress?.(`ParaSpell: tx in block ${hash}`);
 
-  await api.disconnect();
-  await builder.disconnect?.();
-
-  return hash;
+    await builder.disconnect?.();
+    return hash;
+  } finally {
+    await api.disconnect();
+  }
 }
 
 export async function executeTransfer(
   prepared: PreparedTransfer,
   progress?: ProgressFn,
 ): Promise<{
-  mode: 'snowbridge' | 'snowbridge+paraspell';
-  evmTxHash: string;
+  mode: 'snowbridge' | 'snowbridge+paraspell' | 'paraspell_only';
+  evmTxHash?: string;
   substrateTxHash?: string;
 }> {
-  if (prepared.source.kind !== 'evm') {
-    throw new Error('Source musí byť EVM.');
+  // 0) Substrate (AssetHub) -> ParaSpell (NOVÉ)
+  if (prepared.source.kind !== 'evm' && prepared.dest.kind === 'paraspell') {
+    progress?.(`Režim: ParaSpell (AssetHub → ${prepared.dest.label})`);
+    const substrateTxHash = await sendParaspellFromAssetHub(prepared, prepared.dest.chainName, progress);
+    progress?.('Hotovo ');
+    return { mode: 'paraspell_only', substrateTxHash };
   }
 
-  // 1-fázový: Snowbridge priamo na parachain
-  if (prepared.dest.kind === 'snowbridge_para') {
+  // 1) EVM -> parachain (Snowbridge)
+  if (prepared.source.kind === 'evm' && prepared.dest.kind === 'snowbridge_para') {
     progress?.(`Režim: Snowbridge (1 fáza) → ${prepared.dest.label}`);
-    const evmTxHash = await sendSnowbridgeEvmToPara(
-      prepared,
-      prepared.dest.parachainId,
-      progress,
-    );
-    progress?.('Hotovo ✅');
+    const evmTxHash = await sendSnowbridgeEvmToPara(prepared, prepared.dest.parachainId, progress);
+    progress?.('Hotovo ');
     return { mode: 'snowbridge', evmTxHash };
   }
 
-  // 2-fázový: Snowbridge → AssetHub → ParaSpell
-  if (prepared.dest.kind === 'paraspell') {
+  // 2) EVM -> AssetHub -> ParaSpell
+  if (prepared.source.kind === 'evm' && prepared.dest.kind === 'paraspell') {
     progress?.(`Režim: 2-fázový (Snowbridge → ParaSpell) → ${prepared.dest.label}`);
 
     progress?.(`Fáza 1/2: Snowbridge → AssetHub (${ASSET_HUB_PARA_ID})…`);
-    const evmTxHash = await sendSnowbridgeEvmToPara(
-      prepared,
-      ASSET_HUB_PARA_ID,
-      progress,
-    );
+    const evmTxHash = await sendSnowbridgeEvmToPara(prepared, ASSET_HUB_PARA_ID, progress);
 
-    // Poznámka: tu by ideálne malo byť čakanie na doraz assetu / balance polling.
-    // Zatiaľ spúšťame fázu 2 hneď (môže zlyhať ak asset ešte nedorazil).
     progress?.(`Fáza 2/2: ParaSpell → ${prepared.dest.chainName}…`);
-    const substrateTxHash = await sendParaspellFromAssetHub(
-      prepared,
-      prepared.dest.chainName,
-      progress,
-    );
+    const substrateTxHash = await sendParaspellFromAssetHub(prepared, prepared.dest.chainName, progress);
 
-    progress?.('Hotovo ✅');
+    progress?.('Hotovo ');
     return { mode: 'snowbridge+paraspell', evmTxHash, substrateTxHash };
   }
 
-  throw new Error('Neznámy destination typ.');
+  throw new Error(
+    `Unsupported combination: source=${prepared.source.kind}, dest=${prepared.dest.kind}`,
+  );
 }
