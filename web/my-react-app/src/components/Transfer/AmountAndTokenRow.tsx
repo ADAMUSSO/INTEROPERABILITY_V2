@@ -8,7 +8,7 @@ type Props = {
   onAmountChange: (v: string) => void;
   onTokenChange: (v: string) => void;
   disabled?: boolean;
-  tokenOptions?: string[]; // 🔹 nové – voliteľný zoznam tokenov
+  tokenOptions?: string[];
 };
 
 export default function AmountAndTokenRow({
