@@ -1,7 +1,7 @@
 // src/eth/unwrap_eth.ts
 import { ethers } from 'ethers';
 
-const WETH_ADDRESS = import.meta.env.VITE_WETH_ADDRESS as `0x${string}`;
+const WETH_ADDRESS = '0xfff9976782d46cc05630d1f6ebab18b2324d6b14' as `0x${string}`;
 const WETH_ABI = [
   'function withdraw(uint256 wad)',
   'function balanceOf(address) view returns (uint256)',
